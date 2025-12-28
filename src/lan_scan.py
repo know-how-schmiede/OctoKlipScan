@@ -324,7 +324,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--log",
         default="lan_scan.log",
-        help="Pfad zur Debug-Logdatei (Standard: lan_scan.log im aktuellen Ordner).",
+        help="Pfad zur Debug-Logdatei (Standard: lan_scan.log im Skript-Ordner).",
     )
     return parser.parse_args(argv)
 
@@ -345,7 +345,10 @@ def render_progress(done: int, total: int) -> None:
 
 def main() -> None:
     args = parse_args()
-    log_path = os.path.abspath(args.log)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    log_path = (
+        args.log if os.path.isabs(args.log) else os.path.join(script_dir, args.log)
+    )
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s %(levelname)s %(message)s",
