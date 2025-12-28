@@ -6,6 +6,7 @@ Scant IPv4-Netze auf typische Ports und gibt gefundene Hosts aus.
 from __future__ import annotations
 
 import argparse
+import json
 import ipaddress
 import logging
 import os
@@ -195,7 +196,10 @@ def probe_host(ip: str, timeout: float) -> Mapping[str, List[int]]:
 
 
 def scan_network(
-    network: ipaddress.IPv4Network, timeout: float, workers: int
+    network: ipaddress.IPv4Network,
+    timeout: float,
+    workers: int,
+    show_progress: bool = True,
 ) -> Mapping[str, Dict[str, List[int]]]:
     """Scannt ein Netz parallel und sammelt Treffer."""
     hits: Dict[str, Dict[str, List[int]]] = {name: {} for name in TARGETS}
@@ -222,13 +226,16 @@ def scan_network(
 
             with lock:
                 progress += 1
-                render_progress(progress, total)
+                render_progress(progress, total, show_progress)
 
     return hits
 
 
 def scan_hosts(
-    hosts: Sequence[str], timeout: float, workers: int
+    hosts: Sequence[str],
+    timeout: float,
+    workers: int,
+    show_progress: bool = True,
 ) -> Mapping[str, Dict[str, List[int]]]:
     """Scannt eine feste Hostliste parallel und sammelt Treffer."""
     hits: Dict[str, Dict[str, List[int]]] = {name: {} for name in TARGETS}
@@ -260,7 +267,7 @@ def scan_hosts(
 
             with lock:
                 progress += 1
-                render_progress(progress, total)
+                render_progress(progress, total, show_progress)
 
     return hits
 
@@ -275,6 +282,23 @@ def merge_hits(
             existing = set(target.get(name, {}).get(ip, []))
             existing.update(ports)
             target.setdefault(name, {})[ip] = sorted(existing)
+
+
+def build_results(found: Mapping[str, Dict[str, List[int]]]) -> List[Dict[str, object]]:
+    """Normalisiert Treffer fuer JSON-Ausgabe."""
+    results: List[Dict[str, object]] = []
+    for name in TARGETS:
+        service_hits = found.get(name, {})
+        for ip, ports in service_hits.items():
+            results.append(
+                {
+                    "type": name,
+                    "ip": ip,
+                    "ports": sorted(set(ports)),
+                }
+            )
+    results.sort(key=lambda entry: (entry["type"], entry["ip"]))
+    return results
 
 
 def print_summary(found: Mapping[str, Dict[str, List[int]]]) -> None:
@@ -326,11 +350,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="lan_scan.log",
         help="Pfad zur Debug-Logdatei (Standard: lan_scan.log im Skript-Ordner).",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Gibt die Ergebnisse als JSON aus.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Kein Fortschrittsbalken.",
+    )
     return parser.parse_args(argv)
 
 
-def render_progress(done: int, total: int) -> None:
+def render_progress(done: int, total: int, enabled: bool = True) -> None:
     """Gibt einen einfachen Fortschrittsbalken aus."""
+    if not enabled:
+        return
     if total <= 0:
         return
     bar_len = 30
@@ -356,12 +392,20 @@ def main() -> None:
     )
     LOGGER.info("Logdatei: %s", log_path)
 
+    show_progress = not args.no_progress and not args.json
+    hosts: List[str] = []
+    networks: List[ipaddress.IPv4Network] = []
     if args.hosts:
         hosts = [host.strip() for host in args.hosts.split(",") if host.strip()]
-        if hosts:
+        if hosts and not args.json:
             host_list = ", ".join(hosts)
             print(f"Scanne Hosts {host_list} auf OctoPrint/Klipper ...")
-        found = scan_hosts(hosts, timeout=args.timeout, workers=args.workers)
+        found = scan_hosts(
+            hosts,
+            timeout=args.timeout,
+            workers=args.workers,
+            show_progress=show_progress,
+        )
     else:
         if args.cidr:
             cidr_list = [cidr.strip() for cidr in args.cidr.split(",") if cidr.strip()]
@@ -369,19 +413,35 @@ def main() -> None:
         else:
             networks = guess_networks()
 
-        if len(networks) == 1:
-            print(f"Scanne Netz {networks[0]} auf OctoPrint/Klipper ...")
-        else:
-            net_list = ", ".join(str(net) for net in networks)
-            print(f"Scanne Netze {net_list} auf OctoPrint/Klipper ...")
+        if not args.json:
+            if len(networks) == 1:
+                print(f"Scanne Netz {networks[0]} auf OctoPrint/Klipper ...")
+            else:
+                net_list = ", ".join(str(net) for net in networks)
+                print(f"Scanne Netze {net_list} auf OctoPrint/Klipper ...")
 
         found = {name: {} for name in TARGETS}
         for network in networks:
             merge_hits(
                 found,
-                scan_network(network, timeout=args.timeout, workers=args.workers),
+                scan_network(
+                    network,
+                    timeout=args.timeout,
+                    workers=args.workers,
+                    show_progress=show_progress,
+                ),
             )
-    print_summary(found)
+    if args.json:
+        payload = {
+            "results": build_results(found),
+        }
+        if args.hosts:
+            payload["hosts"] = hosts
+        else:
+            payload["networks"] = [str(net) for net in networks]
+        print(json.dumps(payload))
+    else:
+        print_summary(found)
 
 
 if __name__ == "__main__":
